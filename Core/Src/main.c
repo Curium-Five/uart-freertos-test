@@ -24,6 +24,10 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
+#include "stdlib.h"
+#include "stdio.h"
+#include "string.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -50,6 +54,8 @@ I2S_HandleTypeDef hi2s3;
 SPI_HandleTypeDef hspi1;
 
 UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart2;
+DMA_HandleTypeDef hdma_usart1_tx;
 
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
@@ -58,17 +64,10 @@ const osThreadAttr_t defaultTask_attributes = {
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
-/* Definitions for UARTReceiveTask */
-osThreadId_t UARTReceiveTaskHandle;
-const osThreadAttr_t UARTReceiveTask_attributes = {
-  .name = "UARTReceiveTask",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
-};
-/* Definitions for UARTSendTask */
-osThreadId_t UARTSendTaskHandle;
-const osThreadAttr_t UARTSendTask_attributes = {
-  .name = "UARTSendTask",
+/* Definitions for UART_task */
+osThreadId_t UART_taskHandle;
+const osThreadAttr_t UART_task_attributes = {
+  .name = "UART_task",
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
@@ -80,14 +79,15 @@ const osThreadAttr_t UARTSendTask_attributes = {
 void SystemClock_Config(void);
 void PeriphCommonClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_I2S2_Init(void);
 static void MX_I2S3_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_USART2_UART_Init(void);
 void StartDefaultTask(void *argument);
-void StartUARTReceiveTask(void *argument);
-void StartUARTSendTask(void *argument);
+void StartUART_task(void *argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -96,8 +96,14 @@ void StartUARTSendTask(void *argument);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-uint8_t rx_buff[10];
-uint8_t rx_ready = 0;
+int _write(int file, char *ptr, int len)
+{
+  /* Implement your write code here, this is used by puts and printf for example */
+  int i=0;
+  for(i=0 ; i<len ; i++)
+    ITM_SendChar((*ptr++));
+  return len;
+}
 
 /* USER CODE END 0 */
 
@@ -108,6 +114,8 @@ uint8_t rx_ready = 0;
 int main(void)
 {
   /* USER CODE BEGIN 1 */
+
+  void print_debug_msg(const char* msg);
 
   /* USER CODE END 1 */
 
@@ -132,12 +140,16 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_I2C1_Init();
   MX_I2S2_Init();
   MX_I2S3_Init();
   MX_SPI1_Init();
   MX_USART1_UART_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+
+  printf("Starting. Lets go!\n");
 
   /* USER CODE END 2 */
 
@@ -164,11 +176,8 @@ int main(void)
   /* creation of defaultTask */
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
-  /* creation of UARTReceiveTask */
-  UARTReceiveTaskHandle = osThreadNew(StartUARTReceiveTask, NULL, &UARTReceiveTask_attributes);
-
-  /* creation of UARTSendTask */
-  UARTSendTaskHandle = osThreadNew(StartUARTSendTask, NULL, &UARTSendTask_attributes);
+  /* creation of UART_task */
+  UART_taskHandle = osThreadNew(StartUART_task, NULL, &UART_task_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -215,9 +224,9 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
   RCC_OscInitStruct.PLL.PLLM = 8;
-  RCC_OscInitStruct.PLL.PLLN = 192;
-  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV4;
-  RCC_OscInitStruct.PLL.PLLQ = 8;
+  RCC_OscInitStruct.PLL.PLLN = 72;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+  RCC_OscInitStruct.PLL.PLLQ = 3;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -229,10 +238,10 @@ void SystemClock_Config(void)
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_3) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
   {
     Error_Handler();
   }
@@ -432,6 +441,55 @@ static void MX_USART1_UART_Init(void)
 }
 
 /**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA2_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA2_Stream7_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream7_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream7_IRQn);
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -512,12 +570,12 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-  HAL_UART_Receive_IT(&huart1, rx_buff, 10); //You need to toggle a breakpoint on this line!
-  rx_ready = 1;
-}
 
+void print_debug_msg(const char* msg) {
+    if(msg != NULL) {
+    	HAL_UART_Transmit_DMA(&huart1, (uint8_t*)msg, strlen(msg));
+    }
+}
 
 /* USER CODE END 4 */
 
@@ -541,45 +599,47 @@ void StartDefaultTask(void *argument)
   /* USER CODE END 5 */
 }
 
-/* USER CODE BEGIN Header_StartUARTReceiveTask */
+/* USER CODE BEGIN Header_StartUART_task */
 /**
-* @brief Function implementing the UARTReceiveTask thread.
+* @brief Function implementing the UART_task thread.
 * @param argument: Not used
 * @retval None
 */
-/* USER CODE END Header_StartUARTReceiveTask */
-void StartUARTReceiveTask(void *argument)
+/* USER CODE END Header_StartUART_task */
+void StartUART_task(void *argument)
 {
-  /* USER CODE BEGIN StartUARTReceiveTask */
+  /* USER CODE BEGIN StartUART_task */
+	int UART_BUF_SIZE = 4096;
+	int MAX_PKT_SIZE = 2063;
+	struct uart_data {
+		uint8_t uart_buf[UART_BUF_SIZE];
+		uint8_t uart_unpkt_buf[UART_BUF_SIZE];
+		uint8_t deframed_buf[MAX_PKT_SIZE];
+		uint8_t uart_pkted_buf[UART_BUF_SIZE];
+		uint8_t framed_buf[UART_BUF_SIZE];
+		uint16_t uart_size;
+		uint32_t last_com_time;
+		uint32_t init_time;
+	};
+  struct uart_data* data = malloc(sizeof(struct uart_data));
+  UART_HandleTypeDef* huart1_ptr = &huart1;
   /* Infinite loop */
+  HAL_UART_Receive_IT(&huart1, data->uart_buf, UART_BUF_SIZE);
   for(;;)
   {
-	  if(rx_ready){
-		HAL_GPIO_TogglePin(GPIOD, LD5_Pin);
-		rx_ready = 0;
-	   }
+	print_debug_msg("looping\n");
+	vTaskDelay(pdMS_TO_TICKS(1000));
+	uint8_t data_tx[] = {0,1,2,3,4,5,6,7,8,10};
+	//HAL_UART_Transmit_DMA(&huart1, data_tx, sizeof (data_tx));
+	if(huart1_ptr->RxState == HAL_UART_STATE_READY) {
+			data->uart_size = huart1_ptr->RxXferSize - huart1_ptr->RxXferCount;
+			for(uint16_t i = 0; i < data->uart_size; i++) { data->uart_unpkt_buf[i] = data->uart_buf[i]; }
+			HAL_UART_Receive_IT(&huart1, data->uart_buf, UART_BUF_SIZE);
+			print_debug_msg("Received UART!\n");
+   }
 
-	  osDelay(10);
   }
-  /* USER CODE END StartUARTReceiveTask */
-}
-
-/* USER CODE BEGIN Header_StartUARTSendTask */
-/**
-* @brief Function implementing the UARTSendTask thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartUARTSendTask */
-void StartUARTSendTask(void *argument)
-{
-  /* USER CODE BEGIN StartUARTSendTask */
-  /* Infinite loop */
-  for(;;)
-  {
-    osDelay(1000);
-  }
-  /* USER CODE END StartUARTSendTask */
+  /* USER CODE END StartUART_task */
 }
 
 /**
