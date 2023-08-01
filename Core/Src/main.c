@@ -27,6 +27,7 @@
 #include "stdlib.h"
 #include "stdio.h"
 #include "string.h"
+#include "queue.h"
 
 /* USER CODE END Includes */
 
@@ -54,13 +55,14 @@ I2S_HandleTypeDef hi2s3;
 SPI_HandleTypeDef hspi1;
 
 UART_HandleTypeDef huart1;
+DMA_HandleTypeDef hdma_usart1_rx;
 DMA_HandleTypeDef hdma_usart1_tx;
 
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
-  .stack_size = 128 * 4,
+  .stack_size = 1024 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for UART_task */
@@ -70,7 +72,30 @@ const osThreadAttr_t UART_task_attributes = {
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
+/* Definitions for UART_send_task */
+osThreadId_t UART_send_taskHandle;
+const osThreadAttr_t UART_send_task_attributes = {
+  .name = "UART_send_task",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
 /* USER CODE BEGIN PV */
+
+#define BUFFER_SIZE 4096
+#define HDLC_FLAG_SEQUENCE 0x7E
+#define ESCAPE_CHARACTER 0x7D
+#define BIT_STUFFING_XOR 0x20
+
+QueueHandle_t hdlcQueue;
+
+typedef struct HDLC_Frame_Struct {
+    uint8_t data[BUFFER_SIZE];
+    uint16_t length;
+} HDLC_Frame_Struct;
+
+
+static HDLC_Frame_Struct currentFrame = { {0}, 0 };
+static uint16_t currentFrameIndex = 0;
 
 /* USER CODE END PV */
 
@@ -86,6 +111,7 @@ static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
 void StartDefaultTask(void *argument);
 void StartUART_task(void *argument);
+void StartUART_send_task(void *argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -147,6 +173,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   printf("Starting. Lets go!\n");
+  HAL_UART_Receive_DMA(&huart1, &currentFrame.data[currentFrameIndex], 1);
 
   /* USER CODE END 2 */
 
@@ -175,6 +202,9 @@ int main(void)
 
   /* creation of UART_task */
   UART_taskHandle = osThreadNew(StartUART_task, NULL, &UART_task_attributes);
+
+  /* creation of UART_send_task */
+  UART_send_taskHandle = osThreadNew(StartUART_send_task, NULL, &UART_send_task_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -447,6 +477,9 @@ static void MX_DMA_Init(void)
   __HAL_RCC_DMA2_CLK_ENABLE();
 
   /* DMA interrupt init */
+  /* DMA2_Stream2_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream2_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream2_IRQn);
   /* DMA2_Stream7_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream7_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream7_IRQn);
@@ -541,6 +574,43 @@ void print_debug_msg(const char* msg) {
     }
 }
 
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    // If the end flag sequence is received
+    if (currentFrame.data[currentFrameIndex] == HDLC_FLAG_SEQUENCE)
+    {
+        if (currentFrameIndex != 0)
+        {
+        	print_debug_msg("Full frame received\n");
+            // A complete frame has been received
+            currentFrame.length = currentFrameIndex;
+            // Send the frame to the queue
+            xQueueSendFromISR(hdlcQueue, &currentFrame, pdFALSE);
+
+        }
+        currentFrameIndex = 0;
+    }
+    else
+    {
+        // Increment the index
+        currentFrameIndex++;
+
+        // To avoid buffer overflow
+        if(currentFrameIndex >= BUFFER_SIZE)
+        {
+            currentFrameIndex = 0;
+        }
+    }
+
+    // Wait for the next data
+    HAL_UART_Receive_DMA(&huart1, &currentFrame.data[currentFrameIndex], 1);
+}
+
+void process_hdlc_frame(HDLC_Frame_Struct frame){
+	print_debug_msg("Processing HLDLC frame\n");
+}
+
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -573,37 +643,38 @@ void StartDefaultTask(void *argument)
 void StartUART_task(void *argument)
 {
   /* USER CODE BEGIN StartUART_task */
-	int UART_BUF_SIZE = 4096;
-	int MAX_PKT_SIZE = 2063;
-	struct uart_data {
-		uint8_t uart_buf[UART_BUF_SIZE];
-		uint8_t uart_unpkt_buf[UART_BUF_SIZE];
-		uint8_t deframed_buf[MAX_PKT_SIZE];
-		uint8_t uart_pkted_buf[UART_BUF_SIZE];
-		uint8_t framed_buf[UART_BUF_SIZE];
-		uint16_t uart_size;
-		uint32_t last_com_time;
-		uint32_t init_time;
-	};
-  struct uart_data* data = malloc(sizeof(struct uart_data));
-  UART_HandleTypeDef* huart1_ptr = &huart1;
-  /* Infinite loop */
-  HAL_UART_Receive_IT(&huart1, data->uart_buf, UART_BUF_SIZE);
-  for(;;)
-  {
-	print_debug_msg("looping\n");
-	vTaskDelay(pdMS_TO_TICKS(1000));
-	uint8_t data_tx[] = {0,1,2,3,4,5,6,7,8,10};
-	//HAL_UART_Transmit_DMA(&huart1, data_tx, sizeof (data_tx));
-	if(huart1_ptr->RxState == HAL_UART_STATE_READY) {
-			data->uart_size = huart1_ptr->RxXferSize - huart1_ptr->RxXferCount;
-			for(uint16_t i = 0; i < data->uart_size; i++) { data->uart_unpkt_buf[i] = data->uart_buf[i]; }
-			HAL_UART_Receive_IT(&huart1, data->uart_buf, UART_BUF_SIZE);
-			print_debug_msg("Received UART!\n");
-   }
 
+  HDLC_Frame_Struct hdlcFrame;
+
+  print_debug_msg("Starting UART task\n");
+  for(;;)
+  {/*
+      if(xQueueReceive(hdlcQueue, &hdlcFrame, portMAX_DELAY) == pdPASS)
+      {
+          // Process the received HDLC frame
+          process_hdlc_frame(hdlcFrame);
+      }*/
   }
   /* USER CODE END StartUART_task */
+}
+
+/* USER CODE BEGIN Header_StartUART_send_task */
+/**
+* @brief Function implementing the UART_send_task thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartUART_send_task */
+void StartUART_send_task(void *argument)
+{
+  /* USER CODE BEGIN StartUART_send_task */
+  /* Infinite loop */
+  for(;;)
+  {
+	//print_debug_msg("looping\n");
+    osDelay(1);
+  }
+  /* USER CODE END StartUART_send_task */
 }
 
 /**
