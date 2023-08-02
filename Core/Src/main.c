@@ -86,13 +86,12 @@ const osThreadAttr_t UART_send_task_attributes = {
 #define ESCAPE_CHARACTER 0x7D
 #define BIT_STUFFING_XOR 0x20
 
-QueueHandle_t hdlcQueue;
-
 typedef struct HDLC_Frame_Struct {
     uint8_t data[BUFFER_SIZE];
     uint16_t length;
 } HDLC_Frame_Struct;
 
+QueueHandle_t hdlcQueue;
 
 static HDLC_Frame_Struct currentFrame = { {0}, 0 };
 static uint16_t currentFrameIndex = 0;
@@ -174,6 +173,12 @@ int main(void)
 
   printf("Starting. Lets go!\n");
   HAL_UART_Receive_DMA(&huart1, &currentFrame.data[currentFrameIndex], 1);
+  hdlcQueue = xQueueCreate(2, sizeof(HDLC_Frame_Struct));
+  if( hdlcQueue == NULL )
+  {
+      /* Queue was not created and must not be used. */
+	  print_debug_msg("Warning: No queue created!\n");
+  }
 
   /* USER CODE END 2 */
 
@@ -186,6 +191,7 @@ int main(void)
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
   /* add semaphores, ... */
+
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* USER CODE BEGIN RTOS_TIMERS */
@@ -574,7 +580,6 @@ void print_debug_msg(const char* msg) {
     }
 }
 
-
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     // If the end flag sequence is received
@@ -582,11 +587,17 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     {
         if (currentFrameIndex != 0)
         {
-        	print_debug_msg("Full frame received\n");
             // A complete frame has been received
             currentFrame.length = currentFrameIndex;
             // Send the frame to the queue
-            xQueueSendFromISR(hdlcQueue, &currentFrame, pdFALSE);
+            HDLC_Frame_Struct currentFrameCopy = currentFrame;
+            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+            if(xQueueSendFromISR(hdlcQueue, &currentFrameCopy, &xHigherPriorityTaskWoken) == pdTRUE) {
+                    // Message was successfully posted to the queue
+            }
+
+            // If xHigherPriorityTaskWoken was set to true, a context switch should be requested
+            portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 
         }
         currentFrameIndex = 0;
@@ -607,8 +618,83 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     HAL_UART_Receive_DMA(&huart1, &currentFrame.data[currentFrameIndex], 1);
 }
 
-void process_hdlc_frame(HDLC_Frame_Struct frame){
-	print_debug_msg("Processing HLDLC frame\n");
+#define HDLC_FLAG_SEQUENCE 0x7E
+#define HDLC_CONTROL_ESCAPE 0x7D
+#define HDLC_ESCAPE_BIT_FLIP 0x20
+
+void destuff_hdlc_frame(HDLC_Frame_Struct *frame, uint8_t *destuffed_data, uint16_t *destuffed_length){
+
+    *destuffed_length = 0;
+
+    // Flag to keep track of escape characters
+    int escape_flag = 0;
+
+    for(int i = 0; i < frame->length; i++) {
+        if(frame->data[i] == HDLC_CONTROL_ESCAPE) {
+            escape_flag = 1;
+        } else {
+            if(escape_flag) {
+                // If the previous character was an escape character,
+                // flip the 5th bit of the current character
+                destuffed_data[*destuffed_length] = frame->data[i] ^ HDLC_ESCAPE_BIT_FLIP;
+                escape_flag = 0;
+            } else {
+                // No escape character, so just copy the data
+                destuffed_data[*destuffed_length] = frame->data[i];
+            }
+            (*destuffed_length)++;
+        }
+    }
+
+    // Now destuffed_data contains the destuffed data, and destuffed_length is its length.
+    // You can process this data as needed.
+
+    // Debug print the destuffed data:
+    char msg[128]; // 3 characters per byte (2 hex digits and a space)
+    for(int i = 0; i < *destuffed_length; i++) {
+        sprintf(msg + (i * 3), "%02X ", destuffed_data[i]);
+    }
+    /*
+    print_debug_msg("Destuffed data: ");
+    print_debug_msg(msg);
+    print_debug_msg("\n");
+    */
+}
+
+void bit_stuff(uint8_t *data, uint16_t length, uint8_t *stuffed_data, uint16_t *stuffed_length) {
+    *stuffed_length = 0;
+
+    for(int i = 0; i < length; i++) {
+        uint8_t byte = data[i];
+
+        // If the byte is equal to the control escape or flag sequence,
+        // add an escape byte and then the byte XOR'd with the escape bit flip
+        if (byte == HDLC_CONTROL_ESCAPE || byte == HDLC_FLAG_SEQUENCE) {
+        	stuffed_data[(*stuffed_length)++] = HDLC_CONTROL_ESCAPE;
+        	stuffed_data[(*stuffed_length)++] = byte ^ HDLC_ESCAPE_BIT_FLIP;
+        } else {
+            // Otherwise, just copy the byte
+        	stuffed_data[(*stuffed_length)++] = byte;
+        }
+    }
+}
+
+void encode_hldc_frame(uint8_t *data, uint16_t length, HDLC_Frame_Struct *frame) {
+	uint16_t encoded_length = 0;
+    uint16_t stuffed_length;
+    uint8_t stuffed_data[BUFFER_SIZE];
+    bit_stuff(data, length, stuffed_data, &stuffed_length);
+
+    frame->data[encoded_length++] = HDLC_FLAG_SEQUENCE;
+
+    for(int i = 0; i < stuffed_length; i++) {
+        uint8_t byte = stuffed_data[i];
+        frame->data[encoded_length++] = byte;
+    }
+
+	frame->data[encoded_length++] = HDLC_FLAG_SEQUENCE;
+
+	frame->length = encoded_length;
 }
 
 /* USER CODE END 4 */
@@ -648,12 +734,16 @@ void StartUART_task(void *argument)
 
   print_debug_msg("Starting UART task\n");
   for(;;)
-  {/*
-      if(xQueueReceive(hdlcQueue, &hdlcFrame, portMAX_DELAY) == pdPASS)
+  {
+      if(xQueueReceive(hdlcQueue, &hdlcFrame, ( TickType_t ) 10 ) == pdPASS)
       {
           // Process the received HDLC frame
-          process_hdlc_frame(hdlcFrame);
-      }*/
+    	  uint8_t destuffed_data[BUFFER_SIZE];
+    	  uint16_t destuffed_length = 0;
+          destuff_hdlc_frame(&hdlcFrame, destuffed_data, &destuffed_length);
+          encode_hldc_frame(destuffed_data, destuffed_length, &hdlcFrame);
+          HAL_UART_Transmit_DMA(&huart1, hdlcFrame.data, hdlcFrame.length);
+      }
   }
   /* USER CODE END StartUART_task */
 }
@@ -672,6 +762,7 @@ void StartUART_send_task(void *argument)
   for(;;)
   {
 	//print_debug_msg("looping\n");
+
     osDelay(1);
   }
   /* USER CODE END StartUART_send_task */
