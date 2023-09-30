@@ -28,6 +28,7 @@
 #include "stdio.h"
 #include "string.h"
 #include "queue.h"
+#include <ecss-services/inc/Services/Parameter.hpp>
 
 /* USER CODE END Includes */
 
@@ -81,17 +82,20 @@ const osThreadAttr_t UART_send_task_attributes = {
 };
 /* USER CODE BEGIN PV */
 
-#define BUFFER_SIZE 4096
+#define HLDC_BUFFER_SIZE 4096
 #define HDLC_FLAG_SEQUENCE 0x7E
-#define ESCAPE_CHARACTER 0x7D
-#define BIT_STUFFING_XOR 0x20
+#define HLDC_ESCAPE_CHARACTER 0x7D
+#define HLDC_BIT_STUFFING_XOR 0x20
+#define HDLC_MIN_PAKET_LENGTH 2
 
 typedef struct HDLC_Frame_Struct {
-    uint8_t data[BUFFER_SIZE];
+    uint8_t data[HLDC_BUFFER_SIZE];
     uint16_t length;
 } HDLC_Frame_Struct;
 
 QueueHandle_t hdlcQueue;
+
+uint8_t = hldc_buffer[HLDC_BUFFER_SIZE]; //TODO implement instead of queue
 
 static HDLC_Frame_Struct currentFrame = { {0}, 0 };
 static uint16_t currentFrameIndex = 0;
@@ -585,7 +589,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     // If the end flag sequence is received
     if (currentFrame.data[currentFrameIndex] == HDLC_FLAG_SEQUENCE)
     {
-        if (currentFrameIndex != 0)
+        if (currentFrameIndex >= HDLC_MIN_PAKET_LENGTH)
         {
             // A complete frame has been received
             currentFrame.length = currentFrameIndex;
@@ -608,11 +612,13 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         currentFrameIndex++;
 
         // To avoid buffer overflow
-        if(currentFrameIndex >= BUFFER_SIZE)
+        if(currentFrameIndex >= HLDC_BUFFER_SIZE)
         {
             currentFrameIndex = 0;
         }
     }
+
+    //TODO Receiving without DMA, bc just 1 byte
 
     // Wait for the next data
     HAL_UART_Receive_DMA(&huart1, &currentFrame.data[currentFrameIndex], 1);
@@ -682,7 +688,7 @@ void bit_stuff(uint8_t *data, uint16_t length, uint8_t *stuffed_data, uint16_t *
 void encode_hldc_frame(uint8_t *data, uint16_t length, HDLC_Frame_Struct *frame) {
 	uint16_t encoded_length = 0;
     uint16_t stuffed_length;
-    uint8_t stuffed_data[BUFFER_SIZE];
+    uint8_t stuffed_data[HLDC_BUFFER_SIZE];
     bit_stuff(data, length, stuffed_data, &stuffed_length);
 
     frame->data[encoded_length++] = HDLC_FLAG_SEQUENCE;
@@ -738,7 +744,7 @@ void StartUART_task(void *argument)
       if(xQueueReceive(hdlcQueue, &hdlcFrame, ( TickType_t ) 10 ) == pdPASS)
       {
           // Process the received HDLC frame
-    	  uint8_t destuffed_data[BUFFER_SIZE];
+    	  uint8_t destuffed_data[HLDC_BUFFER_SIZE];
     	  uint16_t destuffed_length = 0;
           destuff_hdlc_frame(&hdlcFrame, destuffed_data, &destuffed_length);
           encode_hldc_frame(destuffed_data, destuffed_length, &hdlcFrame);
