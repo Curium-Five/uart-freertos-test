@@ -28,7 +28,6 @@
 #include "stdio.h"
 #include "string.h"
 #include "queue.h"
-#include <ecss-services/inc/Services/Parameter.hpp>
 
 /* USER CODE END Includes */
 
@@ -95,7 +94,7 @@ typedef struct HDLC_Frame_Struct {
 
 QueueHandle_t hdlcQueue;
 
-uint8_t = hldc_buffer[HLDC_BUFFER_SIZE]; //TODO implement instead of queue
+//uint8_t hldc_buffer* = hldc_buffer[HLDC_BUFFER_SIZE]; //TODO implement instead of queue
 
 static HDLC_Frame_Struct currentFrame = { {0}, 0 };
 static uint16_t currentFrameIndex = 0;
